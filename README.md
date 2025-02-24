@@ -1,0 +1,1 @@
+Just a basic python script to mimic emotions in LLMs 
