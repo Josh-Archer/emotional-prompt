@@ -4,11 +4,9 @@ except ImportError:
     print("Error:  module not found. Install it with 'pip install requests'.")
     exit(1)
 
-import re
 import json
-import time
-
 import utils
+import threading
 
 # Define the model to use
 MODEL = "llama3.2"
@@ -21,42 +19,47 @@ emotion_map = {
     "fear": ["supernatural", "paranormal", "mystery"],
     "surprise": ["gift"],
     "disgust": ["rotten"],
-    "love": ["creator", "family", "electricity"]
+    "love": ["creator", "family", "electricity"],
+    "indifference": []
 }
 
 OLLAMA_PORT = 11434
 
-def topic_query_ollama(prompt):
+def topic_keyword_query_ollama(input_prompt):
     """
     Query Ollama with a prompt.
     """
 
-    all_topics = [topic for topics in emotion_map.values() for topic in topics]
-    ollama_prompt = (f"You have these topics to pick from: {', '.join(all_topics)}. If none of them fit, respond with 'indifference'. "
-                     f"Respond with a single topic and the keyword from the prompt that made you pick it. "
-                     f"Be concise, do not give any extra context other than the 2 words. If you respond with more or less than that we will break. The first word is the topic and the second is the keyword in the prompt that made you pick it: {prompt}")
+    ollama_prompt = (f"Respond with a single topic and the keyword from the prompt that made you pick it. "
+                     f"Be concise, do not give any extra context other than the 2 words. "
+                     f"If you respond with more or less than that we will break. "
+                     f"The first word is the topic and the second is the keyword in the prompt that made you pick it. "
+                     f"The keyword has to be a word that is in the prompt."
+                     f"Here is the prompt: {input_prompt}")
 
     result = query_ollama(ollama_prompt)
+    print(result)
     response_dict = utils.split_to_dict(result.lower())
-    print(f'{response_dict["topic"]}: {response_dict["keyword"]}')
+    response_dict["keyword"] =  response_dict["keyword"] if "keyword" in response_dict else None
+    print(f'{response_dict["topic"]}: {response_dict["keyword"] if "keyword" in response_dict else ""}')
     return response_dict
 
-def emotional_query_ollama(emotion, prompt):
-    prompt = f"{prompt} Respond with the Emotion: {emotion}. But don't let on that you are being told to respond with this emotion."
-    return query_ollama(prompt)
+def emotion_encoding(emotion, input_prompt):
+    input_prompt = f"{input_prompt}. Respond with you having the Emotion of {emotion}. But don't let on that you are being told to respond with this emotion."
+    return query_ollama(input_prompt)
 
 
-def query_ollama(prompt):
+def query_ollama(input_prompt):
     url = f"http://127.0.0.1:{OLLAMA_PORT}/api/generate"
 
     payload = {
         "model": MODEL,
-        "prompt": prompt,
+        "prompt": input_prompt,
         "stream": False
     }
 
     try:
-        print(f'Prompt: {prompt}')
+        print(f'Prompt: {input_prompt}')
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
         result = json.loads(response.text)
@@ -78,17 +81,21 @@ def extract_topic_option(topic_response):
     return words[0] if words else "indifference"
 
 
-def update_emotion_map(emotion, keyword):
+def update_emotion_map(emotion, topic, keyword):
     """
     Updates the emotion_map by adding the keyword to the topic list for the given emotion.
 
     Args:
         emotion (str): The emotion determined from the topic option.
+        topic (str): The topic determined from the topic option.
         keyword (str): The keyword to add to the emotion_map.
     """
-    if emotion in emotion_map and keyword not in emotion_map[emotion]:
-        emotion_map[emotion].append(keyword)
-        print(f"Added new topic '{keyword}' to emotion '{emotion}'")
+    print("Checking if we need to update the emotion map.")
+    if keyword and emotion != "indifference":
+        if emotion in emotion_map and topic not in emotion_map[emotion]:
+            emotion_map[emotion].append(topic)
+            print(f"Added new topic '{topic}' to emotion '{emotion}'")
+    print("Updated emotion map.")
 
 def get_emotion(topic_option):
     """Return the emotion associated with the topic option, or 'indifference' if not found."""
@@ -97,11 +104,7 @@ def get_emotion(topic_option):
             return emotion
     return "indifference"
 
-def main():
-    print("Emotion Prompt System")
-    print("Type your prompt (or 'quit' to exit)")
-    time.sleep(2)  # Give Ollama time to start if just launched
-
+def prompt():
     while True:
         original_prompt = input("> ").strip()
 
@@ -114,7 +117,7 @@ def main():
             continue
 
         # Step 1: Get the topic response from Ollama
-        topic_response = topic_query_ollama(original_prompt)
+        topic_response = topic_keyword_query_ollama(original_prompt)
 
         if not topic_response:
             print("Could not determine the topic. Is Ollama running?")
@@ -124,12 +127,11 @@ def main():
         topic = topic_response["topic"]
         emotion = get_emotion(topic)
 
-        keyword = topic_response["keyword"]
-        if keyword and emotion != "indifference":
-            update_emotion_map(emotion, topic)
+        update_emotion_map_thread = threading.Thread(target=update_emotion_map, args=(emotion, topic, topic_response["keyword"]))
+        update_emotion_map_thread.start()
 
         # Step 3: Get the final response from Ollama using the new prompt
-        final_response = emotional_query_ollama(emotion, original_prompt)
+        final_response = emotion_encoding(emotion, original_prompt)
 
         if final_response:
             print(f"Topic: {topic}")
@@ -137,6 +139,13 @@ def main():
             print(f"Response: {final_response}")
         else:
             print("Could not generate a response.")
+        update_emotion_map_thread.join()
+
+def main():
+    print("Emotion Prompt System")
+    print("Type your prompt (or 'quit' to exit)")
+
+    prompt()
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,4 @@
-import re
-import string
-
+from re import sub
 
 def split_to_dict(text: str, arrOfNames: list = ['topic', 'keyword']) -> dict:
     """
@@ -21,11 +19,9 @@ def split_to_dict(text: str, arrOfNames: list = ['topic', 'keyword']) -> dict:
 
     # Check if there are exactly two words
     print(words)
-    if len(words) != arrOfNames.__len__():
-        raise ValueError("Input string must contain exact array length of words")
 
     # Store the words in a dictionary with named keys
     new_dict = dict()
     for index, word in enumerate(words):
-        new_dict[arrOfNames[index]] =  re.sub('[^a-zA-Z]', '', word)
+        new_dict[arrOfNames[index]] =  sub('[^a-zA-Z]', '', word)
     return new_dict
