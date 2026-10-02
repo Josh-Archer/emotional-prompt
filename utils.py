@@ -17,6 +17,9 @@ def split_to_dict(text: str, arrOfNames: list = ['topic', 'keyword']) -> dict:
     global new_dict
     words = text.split()
 
+    if len(words) != 2:
+        raise ValueError("Input string must contain exactly two words.")
+
     # Check if there are exactly two words
     print(words)
 
