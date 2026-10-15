@@ -38,6 +38,8 @@ def topic_keyword_query_ollama(input_prompt):
                      f"Here is the prompt: {input_prompt}")
 
     result = query_ollama(ollama_prompt)
+    if result is None:
+        return None
     print(result)
     response_dict = utils.split_to_dict(result.lower())
     response_dict["keyword"] =  response_dict["keyword"] if "keyword" in response_dict else None
