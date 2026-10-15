@@ -91,7 +91,7 @@ def update_emotion_map(emotion, topic, keyword):
         keyword (str): The keyword to add to the emotion_map.
     """
     print("Checking if we need to update the emotion map.")
-    if keyword and emotion != "indifference":
+    if keyword:
         if emotion in emotion_map and topic not in emotion_map[emotion]:
             emotion_map[emotion].append(topic)
             print(f"Added new topic '{topic}' to emotion '{emotion}'")
