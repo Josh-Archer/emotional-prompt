@@ -4,6 +4,7 @@ except ImportError:
     print("Error:  module not found. Install it with 'pip install requests'.")
     exit(1)
 
+import argparse
 import json
 import utils
 import threading
@@ -51,11 +52,13 @@ def emotion_encoding(emotion, input_prompt):
     return query_ollama(input_prompt)
 
 
-def query_ollama(input_prompt):
-    url = f"http://127.0.0.1:{OLLAMA_PORT}/api/generate"
+def query_ollama(input_prompt, model=None, port=None):
+    target_port = port if port is not None else OLLAMA_PORT
+    target_model = model if model is not None else MODEL
+    url = f"http://127.0.0.1:{target_port}/api/generate"
 
     payload = {
-        "model": MODEL,
+        "model": target_model,
         "prompt": input_prompt,
         "stream": False
     }
@@ -68,8 +71,13 @@ def query_ollama(input_prompt):
         print(f'Response: {result["response"]}')
         return result['response']
     except requests.exceptions.ConnectionError:
-        print(f"Error: Could not connect to Ollama on 127.0.0.1:{OLLAMA_PORT}. Is it running?")
-        print(f"Run 'ollama run {MODEL}' in a terminal and keep it open.")
+        print(
+            f"Error: Could not connect to Ollama on 127.0.0.1:{target_port}. "
+            f"Is it running?"
+        )
+        print(
+            f"Run 'ollama run {target_model}' in a terminal and keep it open."
+        )
         return None
     except requests.exceptions.RequestException as e:
         print(f"Error connecting to Ollama: {e}")
@@ -143,11 +151,42 @@ def prompt():
             print("Could not generate a response.")
         update_emotion_map_thread.join()
 
-def main():
+
+def parse_args(args=None):
+    """
+    Parse command-line arguments for model and port configuration.
+    """
+    parser = argparse.ArgumentParser(
+        description="Emotion Prompt System"
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=MODEL,
+        help=f"Ollama model to use (default: {MODEL})",
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=OLLAMA_PORT,
+        help=f"Ollama server port (default: {OLLAMA_PORT})",
+    )
+    return parser.parse_args(args)
+
+
+def main(args=None):
+    global MODEL, OLLAMA_PORT
+    parsed = parse_args(args)
+    MODEL = parsed.model
+    OLLAMA_PORT = parsed.port
+
     print("Emotion Prompt System")
     print("Type your prompt (or 'quit' to exit)")
 
     prompt()
+
 
 if __name__ == "__main__":
     main()
