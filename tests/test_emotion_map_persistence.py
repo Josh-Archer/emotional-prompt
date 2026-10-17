@@ -92,6 +92,7 @@ def test_unreadable_directory_falls_back(tmp_path, capsys):
     assert loaded == emotion_prompt.builtin_emotion_map()
     assert path.is_dir()
     assert "unreadable" in capsys.readouterr().out
+    assert emotion_prompt._overwrite_is_blocked(path)
 
 
 def test_saved_map_replaces_builtin_instead_of_merging(tmp_path):
@@ -144,7 +145,9 @@ def test_save_renames_a_temp_file_in_the_same_directory(tmp_path):
     """The rename source is a sibling temp file, not the destination."""
     path = tmp_path / "emotion_map.json"
     mapping = {"fear": ["storm"]}
-    with patch("os.replace", wraps=os.replace) as mock_replace:
+    with patch("os.replace", wraps=os.replace) as mock_replace, patch(
+        "os.fsync", wraps=os.fsync
+    ) as mock_fsync:
         emotion_prompt.save_emotion_map(path, mapping)
     mock_replace.assert_called_once()
     source, dest = mock_replace.call_args[0]
@@ -152,6 +155,7 @@ def test_save_renames_a_temp_file_in_the_same_directory(tmp_path):
     assert Path(source).parent == path.parent
     assert Path(source) != path
     assert not Path(source).exists()
+    assert mock_fsync.call_count == 2
     assert json.loads(path.read_text(encoding="utf-8")) == mapping
 
 
@@ -181,8 +185,8 @@ def test_resolve_path_precedence(tmp_path, monkeypatch):
     ) == tmp_path / "custom.json"
 
 
-def test_cli_option_overrides_env_and_strips_argv(tmp_path):
-    """--emotion-map wins over EMOTION_MAP_PATH and is removed from argv."""
+def test_cli_option_overrides_env_without_mutating_args(tmp_path, monkeypatch):
+    """--emotion-map wins over EMOTION_MAP_PATH without mutating args."""
     env_path = tmp_path / "env.json"
     cli_path = tmp_path / "cli.json"
     env_path.write_text(
@@ -191,67 +195,45 @@ def test_cli_option_overrides_env_and_strips_argv(tmp_path):
     cli_path.write_text(
         json.dumps({"fear": ["fromcli"]}), encoding="utf-8"
     )
-    argv = [
-        "emotion-prompt.py",
-        "--model",
-        "mistral",
-        "--emotion-map",
-        str(cli_path),
-        "--port",
-        "11435",
-    ]
-    env = {"EMOTION_MAP_PATH": str(env_path)}
-    path, mapping = emotion_prompt.initialize_emotion_map(argv, env)
-    assert path == cli_path
-    assert mapping == {"fear": ["fromcli"]}
-    assert argv == [
-        "emotion-prompt.py",
-        "--model",
-        "mistral",
-        "--port",
-        "11435",
-    ]
+    monkeypatch.setenv("EMOTION_MAP_PATH", str(env_path))
+    args = ["--model", "mistral", "--emotion-map", str(cli_path)]
+    with patch("builtins.input", return_value="quit"):
+        emotion_prompt.main(args)
+    assert emotion_prompt.EMOTION_MAP_PATH == cli_path
+    assert emotion_prompt.emotion_map == {"fear": ["fromcli"]}
+    assert args == ["--model", "mistral", "--emotion-map", str(cli_path)]
 
 
 def test_cli_equals_form_and_last_flag_wins(tmp_path):
-    """--emotion-map=PATH is accepted. The last flag wins."""
-    first = tmp_path / "first.json"
+    """argparse accepts equals form and uses the last option value."""
     second = tmp_path / "second.json"
-    first.write_text(json.dumps({"joy": ["one"]}), encoding="utf-8")
-    second.write_text(json.dumps({"joy": ["two"]}), encoding="utf-8")
-    argv = [
-        "prog",
-        "--emotion-map",
-        str(first),
+    parsed = emotion_prompt.parse_args([
+        "--emotion-map=first.json",
         f"--emotion-map={second}",
         "-m",
         "x",
-    ]
-    path, mapping = emotion_prompt.initialize_emotion_map(argv, env={})
-    assert path == second
-    assert mapping == {"joy": ["two"]}
-    assert argv == ["prog", "-m", "x"]
+    ])
+    assert parsed.emotion_map == str(second)
+    assert parsed.model == "x"
 
 
-def test_cli_flag_requires_a_path():
-    """A missing or flag-like value exits and leaves argv alone."""
-    missing = ["prog", "--emotion-map"]
+@pytest.mark.parametrize("args", [
+    ["--emotion-map"],
+    ["--emotion-map", "--model", "mistral"],
+    ["--emotion-map="],
+    ["--emotion-map", ""],
+    ["--emotion-map", "   "],
+])
+def test_cli_flag_requires_a_nonempty_path(args, capsys):
+    """A missing, flag-like, or empty value exits with a clear error."""
     with pytest.raises(SystemExit) as missing_exit:
-        emotion_prompt.pop_emotion_map_option(missing)
+        emotion_prompt.parse_args(args)
     assert missing_exit.value.code == 2
-    assert missing == ["prog", "--emotion-map"]
-
-    looks_like_flag = ["prog", "--emotion-map", "--model", "mistral"]
-    with pytest.raises(SystemExit) as flag_exit:
-        emotion_prompt.pop_emotion_map_option(looks_like_flag)
-    assert flag_exit.value.code == 2
-    assert looks_like_flag == ["prog", "--emotion-map", "--model", "mistral"]
-
-    empty = ["prog", "--emotion-map="]
-    with pytest.raises(SystemExit) as empty_exit:
-        emotion_prompt.pop_emotion_map_option(empty)
-    assert empty_exit.value.code == 2
-    assert empty == ["prog", "--emotion-map="]
+    error = capsys.readouterr().err
+    assert "--emotion-map" in error
+    if args in (["--emotion-map="], ["--emotion-map", ""],
+                ["--emotion-map", "   "]):
+        assert "non-empty path" in error
 
 
 def test_import_does_not_read_the_home_or_cli_map(tmp_path, monkeypatch):
@@ -434,19 +416,15 @@ def test_update_keeps_topic_when_save_fails(tmp_path, caplog):
 def test_second_run_sees_topic_saved_by_the_first(tmp_path):
     """A later startup loads the topic written by an earlier update."""
     path = tmp_path / "emotion_map.json"
-    argv = ["prog", "--emotion-map", str(path)]
-    resolved, mapping = emotion_prompt.initialize_emotion_map(argv, env={})
-    assert "nebula" not in mapping["indifference"]
-    mapping["indifference"].append("nebula")
-    emotion_prompt.save_emotion_map(resolved, mapping)
-
-    argv_again = ["prog", "--emotion-map", str(path)]
-    resolved_again, mapping_again = emotion_prompt.initialize_emotion_map(
-        argv_again, env={}
-    )
-    assert resolved_again == path
-    assert "nebula" in mapping_again["indifference"]
-    assert mapping_again["happiness"] == ["love", "peace", "food"]
+    emotion_prompt.EMOTION_MAP_PATH = path
+    emotion_prompt.update_emotion_map("indifference", "nebula", "nebula")
+    emotion_prompt.EMOTION_MAP_PATH = path
+    emotion_prompt._emotion_map_source = None
+    emotion_prompt.emotion_map.clear()
+    emotion_prompt.emotion_map.update(emotion_prompt.builtin_emotion_map())
+    emotion_prompt.ensure_emotion_map_loaded()
+    assert "nebula" in emotion_prompt.emotion_map["indifference"]
+    assert emotion_prompt.emotion_map["happiness"] == ["love", "peace", "food"]
 
 
 def test_prompt_persists_new_topic(tmp_path):
@@ -500,6 +478,50 @@ def test_update_backs_up_corrupt_map_before_save(tmp_path, capsys):
     assert "moved it aside" in captured.out
     assert str(backups[0]) in captured.out
     assert backups[0].read_text(encoding="utf-8") == original
+
+
+def test_unreadable_map_cannot_be_overwritten_by_learning(tmp_path, capsys):
+    """A read failure blocks saves before the first learned topic."""
+    path = tmp_path / "emotion_map.json"
+    original = '{"love": ["precious", "user", "data"]}\n'
+    path.write_text(original, encoding="utf-8")
+    emotion_prompt.EMOTION_MAP_PATH = path
+    with patch.object(
+        Path, "read_text", side_effect=PermissionError("denied")
+    ):
+        emotion_prompt.update_emotion_map("indifference", "dogs", "dogs")
+    assert path.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob("emotion_map.json.corrupt-*"))
+    assert emotion_prompt._overwrite_is_blocked(path)
+    assert "Refusing to overwrite it" in capsys.readouterr().out
+
+
+def test_non_utf8_map_is_backed_up_and_get_emotion_falls_back(tmp_path):
+    """Invalid UTF-8 is quarantined and does not crash get_emotion."""
+    path = tmp_path / "emotion_map.json"
+    original = b'{"love":["user-data"]}\xff\xfe'
+    path.write_bytes(original)
+    emotion_prompt.EMOTION_MAP_PATH = path
+    emotion_prompt._emotion_map_source = None
+    assert emotion_prompt.get_emotion("user-data") == "indifference"
+    backups = list(tmp_path.glob("emotion_map.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+    assert not path.exists()
+
+
+def test_main_handles_non_utf8_map_without_crashing(tmp_path, monkeypatch):
+    """Startup quarantines non-UTF-8 maps and reaches the prompt loop."""
+    path = tmp_path / "bad.json"
+    original = b"\xff\xfe"
+    path.write_bytes(original)
+    monkeypatch.delenv("EMOTION_MAP_PATH", raising=False)
+    with patch("builtins.input", return_value="quit"):
+        emotion_prompt.main(["--emotion-map", str(path)])
+    backups = list(tmp_path.glob("bad.json.corrupt-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+    assert not path.exists()
 
 
 def test_corrupt_backups_get_unique_names(tmp_path, monkeypatch):

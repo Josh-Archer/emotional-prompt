@@ -14,8 +14,8 @@ emotion_prompt = importlib.import_module("emotion-prompt")
 def test_new_topic_is_classified_as_indifference_and_appended_not_refused():
     """
     Regression test for GitHub issue #6:
-    Proves that a new topic unknown to get_emotion is classified as 'indifference'
-    and then accepted/appended to emotion_map['indifference'] rather than refused.
+    Proves an unknown topic is classified as 'indifference' and appended to
+    emotion_map['indifference'] rather than refused.
     """
     new_topic = "cryptography"
     keyword = "ciphers"
@@ -63,8 +63,12 @@ def test_prompt_flow_with_new_topic_mocking_network_calls():
     mock_resp_2.text = emotion_mock_response
     mock_resp_2.raise_for_status = MagicMock()
 
-    with patch("requests.post", side_effect=[mock_resp_1, mock_resp_2]) as mock_post, \
-         patch("builtins.input", side_effect=[user_input, "quit"]):
+    with (
+        patch(
+            "requests.post", side_effect=[mock_resp_1, mock_resp_2]
+        ) as mock_post,
+        patch("builtins.input", side_effect=[user_input, "quit"]),
+    ):
         emotion_prompt.prompt()
 
     assert mock_post.call_count == 2
@@ -73,7 +77,7 @@ def test_prompt_flow_with_new_topic_mocking_network_calls():
 
 
 def test_update_emotion_map_does_not_duplicate_existing_topic():
-    """Verify that updating an already appended topic does not add duplicates."""
+    """Verify that an existing topic is not duplicated."""
     topic = "robotics"
     keyword = "automation"
 
@@ -94,15 +98,24 @@ def test_update_emotion_map_refuses_when_keyword_is_empty_or_none():
 
 
 def test_known_topic_flow_mocking_llm_query():
-    """Verify that existing known topics remain correctly classified and not duplicated."""
+    """Verify known topics stay classified and are not duplicated."""
     known_topic = "peace"
     keyword = "harmony"
 
     assert emotion_prompt.get_emotion(known_topic) == "happiness"
     initial_count = emotion_prompt.emotion_map["happiness"].count(known_topic)
 
-    with patch.object(emotion_prompt, "query_ollama", side_effect=[f"{known_topic} {keyword}", "Peaceful response"]), \
-         patch("builtins.input", side_effect=["give me peace", "quit"]):
+    with (
+        patch.object(
+            emotion_prompt,
+            "query_ollama",
+            side_effect=[f"{known_topic} {keyword}", "Peaceful response"],
+        ),
+        patch("builtins.input", side_effect=["give me peace", "quit"]),
+    ):
         emotion_prompt.prompt()
 
-    assert emotion_prompt.emotion_map["happiness"].count(known_topic) == initial_count
+    assert (
+        emotion_prompt.emotion_map["happiness"].count(known_topic)
+        == initial_count
+    )

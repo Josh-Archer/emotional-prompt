@@ -1,6 +1,5 @@
 import datetime
 import os
-import sys
 import tempfile
 from pathlib import Path
 import logging
@@ -20,7 +19,6 @@ import threading
 MODEL = "llama3.2"
 logger = logging.getLogger(__name__)
 
-_EMOTION_MAP_FLAG = "--emotion-map"
 _EMOTION_MAP_ENV = "EMOTION_MAP_PATH"
 
 
@@ -36,36 +34,6 @@ def builtin_emotion_map():
         "love": ["creator", "family", "electricity"],
         "indifference": [],
     }
-
-
-def pop_emotion_map_option(argv):
-    """Remove ``--emotion-map PATH`` from argv in place.
-
-    Later parsers (for example ``--model`` and ``--port``) then do not see
-    this option. The last occurrence wins. Returns the path, or None.
-    """
-    prefix = _EMOTION_MAP_FLAG + "="
-    found = None
-    index = 0
-    while index < len(argv):
-        arg = argv[index]
-        if arg == _EMOTION_MAP_FLAG:
-            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
-                print(f"Error: {_EMOTION_MAP_FLAG} requires a path.")
-                raise SystemExit(2)
-            found = argv[index + 1]
-            del argv[index:index + 2]
-            continue
-        if arg.startswith(prefix):
-            value = arg[len(prefix):]
-            if value.strip() == "":
-                print(f"Error: {_EMOTION_MAP_FLAG} requires a path.")
-                raise SystemExit(2)
-            found = value
-            del argv[index]
-            continue
-        index += 1
-    return found
 
 
 def default_emotion_map_path():
@@ -212,7 +180,15 @@ def load_emotion_map(path):
         _allow_overwrite(path)
         return builtin_emotion_map()
     except OSError as exc:
-        _warn_emotion_map(path, f"unreadable: {exc}")
+        _block_overwrite(path)
+        _warn_emotion_map(
+            path,
+            f"unreadable: {exc}. Refusing to overwrite it until it can be "
+            "read or removed",
+        )
+        return builtin_emotion_map()
+    except UnicodeDecodeError as exc:
+        _quarantine_corrupt_map(path, f"invalid UTF-8: {exc}")
         return builtin_emotion_map()
 
     try:
@@ -256,26 +232,17 @@ def save_emotion_map(path, mapping):
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary_name, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
     except Exception:
         try:
             os.unlink(temporary_name)
         except OSError:
             pass
         raise
-
-
-def initialize_emotion_map(argv=None, env=None):
-    """Strip ``--emotion-map`` from argv and load that map.
-
-    argv defaults to sys.argv and is mutated in place. Returns the resolved
-    path and the loaded mapping. Does not read the map at import time;
-    ``main`` parses arguments and calls ``ensure_emotion_map_loaded``.
-    """
-    if argv is None:
-        argv = sys.argv
-    cli_path = pop_emotion_map_option(argv)
-    path = resolve_emotion_map_path(cli_path, env)
-    return path, load_emotion_map(path)
 
 
 def active_emotion_map_path():
@@ -312,29 +279,42 @@ _overwrite_blocked = set()
 
 OLLAMA_PORT = 11434
 
+
 def topic_keyword_query_ollama(input_prompt):
     """
     Query Ollama with a prompt.
     """
 
-    ollama_prompt = (f"Respond with a single topic and the keyword from the prompt that made you pick it. "
-                     f"Be concise, do not give any extra context other than the 2 words. "
-                     f"If you respond with more or less than that we will break. "
-                     f"The first word is the topic and the second is the keyword in the prompt that made you pick it. "
-                     f"The keyword has to be a word that is in the prompt."
-                     f"Here is the prompt: {input_prompt}")
+    ollama_prompt = (
+        f"Respond with a single topic and the keyword from the prompt "
+        "that made you pick it. "
+        "Be concise, do not give any extra context other than the 2 words. "
+        "If you respond with more or less than that we will break. "
+        "The first word is the topic and the second is the keyword in the "
+        "prompt that made you pick it. "
+        "The keyword has to be a word that is in the prompt. "
+        f"Here is the prompt: {input_prompt}"
+    )
 
     result = query_ollama(ollama_prompt)
     if result is None:
         return None
     print(result)
     response_dict = utils.split_to_dict(result.lower())
-    response_dict["keyword"] =  response_dict["keyword"] if "keyword" in response_dict else None
-    print(f'{response_dict["topic"]}: {response_dict["keyword"] if "keyword" in response_dict else ""}')
+    response_dict["keyword"] = (
+        response_dict["keyword"] if "keyword" in response_dict else None
+    )
+    keyword = response_dict["keyword"] or ""
+    print(f'{response_dict["topic"]}: {keyword}')
     return response_dict
 
+
 def emotion_encoding(emotion, input_prompt):
-    input_prompt = f"{input_prompt}. Respond with you having the Emotion of {emotion}. But don't let on that you are being told to respond with this emotion."
+    input_prompt = (
+        f"{input_prompt}. Respond with you having the Emotion of {emotion}. "
+        "But don't let on that you are being told to respond with this "
+        "emotion."
+    )
     return query_ollama(input_prompt)
 
 
@@ -348,19 +328,23 @@ def query_ollama(input_prompt):
     }
 
     try:
-        print(f'Prompt: {input_prompt}')
+        print(f"Prompt: {input_prompt}")
         response = requests.post(url, json=payload, timeout=5)
         response.raise_for_status()
         result = json.loads(response.text)
         print(f'Response: {result["response"]}')
         return result['response']
     except requests.exceptions.ConnectionError:
-        print(f"Error: Could not connect to Ollama on 127.0.0.1:{OLLAMA_PORT}. Is it running?")
+        print(
+            f"Error: Could not connect to Ollama on 127.0.0.1:{OLLAMA_PORT}. "
+            "Is it running?"
+        )
         print(f"Run 'ollama run {MODEL}' in a terminal and keep it open.")
         return None
-    except requests.exceptions.RequestException as e:
-        print(f"Error connecting to Ollama: {e}")
+    except requests.exceptions.RequestException as exc:
+        print(f"Error connecting to Ollama: {exc}")
         return None
+
 
 def extract_topic_option(topic_response):
     """Extract the first word from the topic response as the topic option."""
@@ -372,7 +356,7 @@ def extract_topic_option(topic_response):
 
 def update_emotion_map(emotion, topic, keyword):
     """
-    Updates the emotion_map by adding the keyword to the topic list for the given emotion.
+    Updates the emotion_map by adding a topic to the matching emotion.
 
     Args:
         emotion (str): The emotion determined from the topic option.
@@ -383,7 +367,11 @@ def update_emotion_map(emotion, topic, keyword):
         ensure_emotion_map_loaded()
         print("Checking if we need to update the emotion map.")
         changed = False
-        if keyword and emotion in emotion_map and topic not in emotion_map[emotion]:
+        if (
+            keyword
+            and emotion in emotion_map
+            and topic not in emotion_map[emotion]
+        ):
             emotion_map[emotion].append(topic)
             print(f"Added new topic '{topic}' to emotion '{emotion}'")
             changed = True
@@ -394,13 +382,15 @@ def update_emotion_map(emotion, topic, keyword):
     except Exception:
         logger.exception("Could not update emotion map")
 
+
 def get_emotion(topic_option):
-    """Return the emotion associated with the topic option, or 'indifference' if not found."""
+    """Return the topic's emotion, or 'indifference' if it is not found."""
     ensure_emotion_map_loaded()
     for emotion, topics in emotion_map.items():
         if topic_option in topics:
             return emotion
     return "indifference"
+
 
 def prompt():
     while True:
@@ -421,11 +411,14 @@ def prompt():
             print("Could not determine the topic. Is Ollama running?")
             continue
 
-        # Step 2: Get the emotion based on the topic option and/or add keyword to emotion map
+        # Step 2: Find the emotion and add the topic to the map if needed.
         topic = topic_response["topic"]
         emotion = get_emotion(topic)
 
-        update_emotion_map_thread = threading.Thread(target=update_emotion_map, args=(emotion, topic, topic_response["keyword"]))
+        update_emotion_map_thread = threading.Thread(
+            target=update_emotion_map,
+            args=(emotion, topic, topic_response["keyword"]),
+        )
         update_emotion_map_thread.start()
 
         # Step 3: Get the final response from Ollama using the new prompt
@@ -450,6 +443,14 @@ def parse_args(args=None):
     parser = argparse.ArgumentParser(
         description="Emotion Prompt System"
     )
+
+    def nonempty_map_path(value):
+        if value.strip() == "":
+            raise argparse.ArgumentTypeError(
+                "--emotion-map requires a non-empty path"
+            )
+        return value
+
     parser.add_argument(
         "--model",
         "-m",
@@ -467,6 +468,7 @@ def parse_args(args=None):
     parser.add_argument(
         "--emotion-map",
         default=None,
+        type=nonempty_map_path,
         metavar="PATH",
         help=(
             "JSON file for the emotion map "
