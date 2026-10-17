@@ -21,8 +21,12 @@ def reset_emotion_map():
         "love": ["creator", "family", "electricity"],
         "indifference": []
     }
+    emotion_prompt.MODEL = "llama3.2"
+    emotion_prompt.OLLAMA_PORT = 11434
     emotion_prompt.emotion_map.clear()
     emotion_prompt.emotion_map.update({k: list(v) for k, v in initial_map.items()})
     yield
+    emotion_prompt.MODEL = "llama3.2"
+    emotion_prompt.OLLAMA_PORT = 11434
     emotion_prompt.emotion_map.clear()
     emotion_prompt.emotion_map.update({k: list(v) for k, v in initial_map.items()})
