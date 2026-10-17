@@ -1,7 +1,9 @@
+import datetime
 import os
 import sys
 import tempfile
 from pathlib import Path
+import logging
 
 try:
     import requests
@@ -9,12 +11,14 @@ except ImportError:
     print("Error:  module not found. Install it with 'pip install requests'.")
     exit(1)
 
+import argparse
 import json
 import utils
 import threading
 
 # Define the model to use
 MODEL = "llama3.2"
+logger = logging.getLogger(__name__)
 
 _EMOTION_MAP_FLAG = "--emotion-map"
 _EMOTION_MAP_ENV = "EMOTION_MAP_PATH"
@@ -88,6 +92,95 @@ def _warn_emotion_map(path, reason):
     )
 
 
+def _destination_path(path):
+    """Return the file to replace.
+
+    ``os.replace`` on a symlink replaces the link with a regular file.
+    Follow the link so writes update the target and leave the link in place.
+    """
+    path = Path(path)
+    if path.is_symlink():
+        return path.resolve()
+    return path
+
+
+def _corrupt_backup_stamp():
+    """Timestamp used in ``<name>.corrupt-<stamp>`` backup names."""
+    return datetime.datetime.now().strftime("%Y%m%dT%H%M%S%f")
+
+
+def _unique_corrupt_backup(source):
+    """Return a sibling path that does not exist yet."""
+    source = Path(source)
+    stamp = _corrupt_backup_stamp()
+    candidate = source.with_name(f"{source.name}.corrupt-{stamp}")
+    counter = 1
+    while candidate.exists() or candidate.is_symlink():
+        candidate = source.with_name(
+            f"{source.name}.corrupt-{stamp}-{counter}"
+        )
+        counter += 1
+    return candidate
+
+
+def _block_tokens(path):
+    path = Path(path)
+    tokens = {str(path)}
+    try:
+        tokens.add(str(path.resolve()))
+    except OSError:
+        pass
+    return tokens
+
+
+def _block_overwrite(path):
+    _overwrite_blocked.update(_block_tokens(path))
+    followed = _destination_path(path)
+    _overwrite_blocked.update(_block_tokens(followed))
+
+
+def _allow_overwrite(path):
+    _overwrite_blocked.difference_update(_block_tokens(path))
+    try:
+        followed = _destination_path(path)
+    except OSError:
+        return
+    _overwrite_blocked.difference_update(_block_tokens(followed))
+
+
+def _overwrite_is_blocked(path):
+    if _block_tokens(path) & _overwrite_blocked:
+        return True
+    try:
+        followed = _destination_path(path)
+    except OSError:
+        return False
+    return bool(_block_tokens(followed) & _overwrite_blocked)
+
+
+def _quarantine_corrupt_map(path, reason):
+    """Move a corrupt map aside so a later save cannot destroy it.
+
+    Returns the backup path. If the file cannot be moved, remember the
+    path and refuse any later overwrite. The original bytes stay put.
+    """
+    source = _destination_path(path)
+    backup = _unique_corrupt_backup(source)
+    try:
+        os.replace(source, backup)
+    except OSError as exc:
+        _block_overwrite(path)
+        _warn_emotion_map(
+            path,
+            f"{reason}; could not move it aside ({exc}). "
+            "Refusing to overwrite it",
+        )
+        return None
+    _allow_overwrite(path)
+    _warn_emotion_map(path, f"{reason}; moved it aside to {backup}")
+    return backup
+
+
 def _is_valid_emotion_map(data):
     if not isinstance(data, dict):
         return False
@@ -105,13 +198,18 @@ def load_emotion_map(path):
     """Load a map from path.
 
     A missing file yields the built-in map and is left uncreated. An
-    unreadable or invalid file also yields the built-in map, with a
-    warning, and is not overwritten.
+    unreadable file yields the built-in map, with a warning, and is left
+    in place. Invalid JSON or invalid contents are moved aside to
+    ``<filename>.corrupt-<timestamp>`` before any later save, and the
+    warning names that backup. The built-in map is returned. If the
+    corrupt file cannot be moved, it is left in place and later saves
+    refuse to overwrite it.
     """
     path = Path(path)
     try:
         raw = path.read_text(encoding="utf-8-sig")
     except FileNotFoundError:
+        _allow_overwrite(path)
         return builtin_emotion_map()
     except OSError as exc:
         _warn_emotion_map(path, f"unreadable: {exc}")
@@ -120,22 +218,31 @@ def load_emotion_map(path):
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        _warn_emotion_map(path, f"invalid JSON: {exc}")
+        _quarantine_corrupt_map(path, f"invalid JSON: {exc}")
         return builtin_emotion_map()
 
     if not _is_valid_emotion_map(data):
-        _warn_emotion_map(path, "invalid contents")
+        _quarantine_corrupt_map(path, "invalid contents")
         return builtin_emotion_map()
+    _allow_overwrite(path)
     return {key: list(topics) for key, topics in data.items()}
 
 
 def save_emotion_map(path, mapping):
-    """Atomically replace path with the JSON encoding of mapping.
+    """Atomically replace the map file with the JSON encoding of mapping.
 
     A temp file in the same directory is written and fsynced, then renamed
     into place. A crash before the rename leaves the previous file intact.
+    If path is a symlink, the target file is replaced and the link stays.
+    A path whose corrupt contents could not be backed up is not replaced.
     """
-    path = Path(path)
+    requested = Path(path)
+    path = _destination_path(requested)
+    if _overwrite_is_blocked(requested) or _overwrite_is_blocked(path):
+        raise OSError(
+            "refusing to overwrite emotion map at "
+            f"{requested} because a corrupt copy could not be backed up"
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(mapping, indent=2, ensure_ascii=False) + "\n"
     temporary_fd, temporary_name = tempfile.mkstemp(
@@ -161,7 +268,8 @@ def initialize_emotion_map(argv=None, env=None):
     """Strip ``--emotion-map`` from argv and load that map.
 
     argv defaults to sys.argv and is mutated in place. Returns the resolved
-    path and the loaded mapping.
+    path and the loaded mapping. Does not read the map at import time;
+    ``main`` parses arguments and calls ``ensure_emotion_map_loaded``.
     """
     if argv is None:
         argv = sys.argv
@@ -170,8 +278,37 @@ def initialize_emotion_map(argv=None, env=None):
     return path, load_emotion_map(path)
 
 
-# Load on startup. --emotion-map and EMOTION_MAP_PATH override the default.
-EMOTION_MAP_PATH, emotion_map = initialize_emotion_map()
+def active_emotion_map_path():
+    """Return the map path, choosing the default only on first use."""
+    global EMOTION_MAP_PATH
+    if EMOTION_MAP_PATH is None:
+        EMOTION_MAP_PATH = resolve_emotion_map_path(None)
+    return Path(EMOTION_MAP_PATH)
+
+
+def ensure_emotion_map_loaded():
+    """Load ``EMOTION_MAP_PATH`` into ``emotion_map`` once per path.
+
+    Import does not call this, so a test can redirect ``EMOTION_MAP_PATH``
+    before the real home map is read.
+    """
+    global _emotion_map_source
+    path = active_emotion_map_path()
+    if _emotion_map_source == path:
+        return path
+    loaded = load_emotion_map(path)
+    emotion_map.clear()
+    emotion_map.update(loaded)
+    _emotion_map_source = path
+    return path
+
+
+# Not loaded from disk at import. main() loads after argparse, and the
+# first get/update loads after tests redirect EMOTION_MAP_PATH.
+EMOTION_MAP_PATH = None
+emotion_map = builtin_emotion_map()
+_emotion_map_source = None
+_overwrite_blocked = set()
 
 OLLAMA_PORT = 11434
 
@@ -242,25 +379,24 @@ def update_emotion_map(emotion, topic, keyword):
         topic (str): The topic determined from the topic option.
         keyword (str): The keyword to add to the emotion_map.
     """
-    print("Checking if we need to update the emotion map.")
-    changed = False
-    if keyword:
-        if emotion in emotion_map and topic not in emotion_map[emotion]:
+    try:
+        ensure_emotion_map_loaded()
+        print("Checking if we need to update the emotion map.")
+        changed = False
+        if keyword and emotion in emotion_map and topic not in emotion_map[emotion]:
             emotion_map[emotion].append(topic)
             print(f"Added new topic '{topic}' to emotion '{emotion}'")
             changed = True
-    print("Updated emotion map.")
-    if changed:
-        try:
-            save_emotion_map(EMOTION_MAP_PATH, emotion_map)
-        except OSError as exc:
-            print(
-                "Error: could not save emotion map to "
-                f"{EMOTION_MAP_PATH} ({exc})."
-            )
+        print("Updated emotion map.")
+        if changed:
+            path = active_emotion_map_path()
+            save_emotion_map(path, emotion_map)
+    except Exception:
+        logger.exception("Could not update emotion map")
 
 def get_emotion(topic_option):
     """Return the emotion associated with the topic option, or 'indifference' if not found."""
+    ensure_emotion_map_loaded()
     for emotion, topics in emotion_map.items():
         if topic_option in topics:
             return emotion
@@ -303,11 +439,59 @@ def prompt():
             print("Could not generate a response.")
         update_emotion_map_thread.join()
 
-def main():
+
+def parse_args(args=None):
+    """Parse command-line arguments for model, port, and the emotion map.
+
+    ``--model`` and ``--port`` are the same options used by the model/port
+    CLI. ``--emotion-map`` selects the on-disk map and is listed in
+    ``--help``.
+    """
+    parser = argparse.ArgumentParser(
+        description="Emotion Prompt System"
+    )
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default=MODEL,
+        help=f"Ollama model to use (default: {MODEL})",
+    )
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=OLLAMA_PORT,
+        help=f"Ollama server port (default: {OLLAMA_PORT})",
+    )
+    parser.add_argument(
+        "--emotion-map",
+        default=None,
+        metavar="PATH",
+        help=(
+            "JSON file for the emotion map "
+            "(default: $EMOTION_MAP_PATH or "
+            "~/.emotional-prompt/emotion_map.json)"
+        ),
+    )
+    return parser.parse_args(args)
+
+
+def main(args=None):
+    """Load configuration and run the interactive prompt."""
+    global MODEL, OLLAMA_PORT, EMOTION_MAP_PATH, _emotion_map_source
+    parsed = parse_args(args)
+    MODEL = parsed.model
+    OLLAMA_PORT = parsed.port
+    EMOTION_MAP_PATH = resolve_emotion_map_path(parsed.emotion_map)
+    _emotion_map_source = None
+    ensure_emotion_map_loaded()
+
     print("Emotion Prompt System")
     print("Type your prompt (or 'quit' to exit)")
 
     prompt()
+
 
 if __name__ == "__main__":
     main()
