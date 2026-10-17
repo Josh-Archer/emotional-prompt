@@ -280,10 +280,12 @@ _overwrite_blocked = set()
 OLLAMA_PORT = 11434
 
 
-def topic_keyword_query_ollama(input_prompt):
-    """
-    Query Ollama with a prompt.
-    """
+def topic_keyword_query_ollama(input_prompt, max_retries=3, retries=None):
+    """Query Ollama, retrying replies that do not contain two tokens."""
+    if retries is not None:
+        max_retries = retries
+    if max_retries is None or max_retries <= 0:
+        raise ValueError("max_retries must be greater than 0")
 
     ollama_prompt = (
         f"Respond with a single topic and the keyword from the prompt "
@@ -296,17 +298,29 @@ def topic_keyword_query_ollama(input_prompt):
         f"Here is the prompt: {input_prompt}"
     )
 
-    result = query_ollama(ollama_prompt)
-    if result is None:
-        return None
-    print(result)
-    response_dict = utils.split_to_dict(result.lower())
-    response_dict["keyword"] = (
-        response_dict["keyword"] if "keyword" in response_dict else None
+    last_result = None
+    for _ in range(max_retries):
+        result = query_ollama(ollama_prompt)
+        if result is None:
+            return None
+        print(result)
+        try:
+            response_dict = utils.split_to_dict(result.lower())
+        except ValueError:
+            last_result = result
+            continue
+        response_dict["keyword"] = response_dict.get("keyword")
+        keyword = response_dict["keyword"] or ""
+        print(f'{response_dict["topic"]}: {keyword}')
+        return response_dict
+
+    attempts_word = "attempt" if max_retries == 1 else "attempts"
+    error_message = (
+        f"Model did not return two tokens after {max_retries} {attempts_word} "
+        f"(last response: {last_result!r})"
     )
-    keyword = response_dict["keyword"] or ""
-    print(f'{response_dict["topic"]}: {keyword}')
-    return response_dict
+    print(f"Error: {error_message}")
+    raise ValueError(error_message)
 
 
 def emotion_encoding(emotion, input_prompt):
@@ -405,7 +419,10 @@ def prompt():
             continue
 
         # Step 1: Get the topic response from Ollama
-        topic_response = topic_keyword_query_ollama(original_prompt)
+        try:
+            topic_response = topic_keyword_query_ollama(original_prompt)
+        except ValueError:
+            continue
 
         if not topic_response:
             print("Could not determine the topic. Is Ollama running?")
