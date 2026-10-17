@@ -523,7 +523,9 @@ def test_corrupt_backups_get_unique_names(tmp_path, monkeypatch):
     assert (tmp_path / names[1]).read_text(encoding="utf-8") == "{worse"
 
 
-def test_refuses_to_overwrite_when_corrupt_backup_fails(tmp_path, capsys, caplog):
+def test_refuses_to_overwrite_when_corrupt_backup_fails(
+    tmp_path, capsys, caplog
+):
     """If the corrupt file cannot be moved, a later save leaves it alone."""
     path = tmp_path / "emotion_map.json"
     original = "{not json"
