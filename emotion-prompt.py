@@ -217,7 +217,7 @@ def save_emotion_map(path, mapping):
     if _overwrite_is_blocked(requested) or _overwrite_is_blocked(path):
         raise OSError(
             "refusing to overwrite emotion map at "
-            f"{requested} because a corrupt copy could not be backed up"
+            f"{requested} because it could not be read or backed up"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(mapping, indent=2, ensure_ascii=False) + "\n"

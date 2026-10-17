@@ -480,7 +480,9 @@ def test_update_backs_up_corrupt_map_before_save(tmp_path, capsys):
     assert backups[0].read_text(encoding="utf-8") == original
 
 
-def test_unreadable_map_cannot_be_overwritten_by_learning(tmp_path, capsys):
+def test_unreadable_map_cannot_be_overwritten_by_learning(
+    tmp_path, capsys, caplog
+):
     """A read failure blocks saves before the first learned topic."""
     path = tmp_path / "emotion_map.json"
     original = '{"love": ["precious", "user", "data"]}\n'
@@ -493,7 +495,10 @@ def test_unreadable_map_cannot_be_overwritten_by_learning(tmp_path, capsys):
     assert path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("emotion_map.json.corrupt-*"))
     assert emotion_prompt._overwrite_is_blocked(path)
-    assert "Refusing to overwrite it" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "Refusing to overwrite it" in output
+    assert "could not be read or backed up" in caplog.text
+    assert "corrupt copy" not in caplog.text
 
 
 def test_non_utf8_map_is_backed_up_and_get_emotion_falls_back(tmp_path):
@@ -564,7 +569,7 @@ def test_refuses_to_overwrite_when_corrupt_backup_fails(
     emotion_prompt.emotion_map.update(loaded)
     emotion_prompt.update_emotion_map("indifference", "dogs", "dogs")
     assert path.read_text(encoding="utf-8") == original
-    assert "could not be backed up" in caplog.text
+    assert "backed up" in caplog.text
 
 
 def test_save_writes_through_a_symlink(tmp_path):
