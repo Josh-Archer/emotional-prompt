@@ -1,3 +1,8 @@
+import os
+import sys
+import tempfile
+from pathlib import Path
+
 try:
     import requests
 except ImportError:
@@ -11,17 +16,162 @@ import threading
 # Define the model to use
 MODEL = "llama3.2"
 
-# Dictionary mapping emotions to lists of topics
-emotion_map = {
-    "happiness": ["love", "peace", "food"],
-    "sadness": ["death", "loss"],
-    "anger": ["war", "conflict", "betrayal", "heartbreak"],
-    "fear": ["supernatural", "paranormal", "mystery"],
-    "surprise": ["gift"],
-    "disgust": ["rotten"],
-    "love": ["creator", "family", "electricity"],
-    "indifference": []
-}
+_EMOTION_MAP_FLAG = "--emotion-map"
+_EMOTION_MAP_ENV = "EMOTION_MAP_PATH"
+
+
+def builtin_emotion_map():
+    """Return a fresh copy of the built-in emotion map."""
+    return {
+        "happiness": ["love", "peace", "food"],
+        "sadness": ["death", "loss"],
+        "anger": ["war", "conflict", "betrayal", "heartbreak"],
+        "fear": ["supernatural", "paranormal", "mystery"],
+        "surprise": ["gift"],
+        "disgust": ["rotten"],
+        "love": ["creator", "family", "electricity"],
+        "indifference": [],
+    }
+
+
+def pop_emotion_map_option(argv):
+    """Remove ``--emotion-map PATH`` from argv in place.
+
+    Later parsers (for example ``--model`` and ``--port``) then do not see
+    this option. The last occurrence wins. Returns the path, or None.
+    """
+    prefix = _EMOTION_MAP_FLAG + "="
+    found = None
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == _EMOTION_MAP_FLAG:
+            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                print(f"Error: {_EMOTION_MAP_FLAG} requires a path.")
+                raise SystemExit(2)
+            found = argv[index + 1]
+            del argv[index:index + 2]
+            continue
+        if arg.startswith(prefix):
+            value = arg[len(prefix):]
+            if value.strip() == "":
+                print(f"Error: {_EMOTION_MAP_FLAG} requires a path.")
+                raise SystemExit(2)
+            found = value
+            del argv[index]
+            continue
+        index += 1
+    return found
+
+
+def default_emotion_map_path():
+    """Return the default on-disk location of the emotion map."""
+    return Path.home() / ".emotional-prompt" / "emotion_map.json"
+
+
+def resolve_emotion_map_path(cli_path=None, env=None):
+    """Choose a path. The CLI option wins, then the env var, then default."""
+    if env is None:
+        env = os.environ
+    if cli_path is not None and str(cli_path).strip() != "":
+        return Path(cli_path).expanduser()
+    env_value = env.get(_EMOTION_MAP_ENV, "")
+    if isinstance(env_value, str) and env_value.strip() != "":
+        return Path(env_value.strip()).expanduser()
+    return default_emotion_map_path()
+
+
+def _warn_emotion_map(path, reason):
+    print(
+        f"Warning: could not load emotion map from {path} ({reason}). "
+        "Using the built-in emotion map."
+    )
+
+
+def _is_valid_emotion_map(data):
+    if not isinstance(data, dict):
+        return False
+    for key, topics in data.items():
+        if not isinstance(key, str) or key.strip() == "":
+            return False
+        if not isinstance(topics, list):
+            return False
+        if not all(isinstance(topic, str) for topic in topics):
+            return False
+    return True
+
+
+def load_emotion_map(path):
+    """Load a map from path.
+
+    A missing file yields the built-in map and is left uncreated. An
+    unreadable or invalid file also yields the built-in map, with a
+    warning, and is not overwritten.
+    """
+    path = Path(path)
+    try:
+        raw = path.read_text(encoding="utf-8-sig")
+    except FileNotFoundError:
+        return builtin_emotion_map()
+    except OSError as exc:
+        _warn_emotion_map(path, f"unreadable: {exc}")
+        return builtin_emotion_map()
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _warn_emotion_map(path, f"invalid JSON: {exc}")
+        return builtin_emotion_map()
+
+    if not _is_valid_emotion_map(data):
+        _warn_emotion_map(path, "invalid contents")
+        return builtin_emotion_map()
+    return {key: list(topics) for key, topics in data.items()}
+
+
+def save_emotion_map(path, mapping):
+    """Atomically replace path with the JSON encoding of mapping.
+
+    A temp file in the same directory is written and fsynced, then renamed
+    into place. A crash before the rename leaves the previous file intact.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(mapping, indent=2, ensure_ascii=False) + "\n"
+    temporary_fd, temporary_name = tempfile.mkstemp(
+        dir=path.parent,
+        prefix="emotion_map.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(temporary_fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary_name, path)
+    except Exception:
+        try:
+            os.unlink(temporary_name)
+        except OSError:
+            pass
+        raise
+
+
+def initialize_emotion_map(argv=None, env=None):
+    """Strip ``--emotion-map`` from argv and load that map.
+
+    argv defaults to sys.argv and is mutated in place. Returns the resolved
+    path and the loaded mapping.
+    """
+    if argv is None:
+        argv = sys.argv
+    cli_path = pop_emotion_map_option(argv)
+    path = resolve_emotion_map_path(cli_path, env)
+    return path, load_emotion_map(path)
+
+
+# Load on startup. --emotion-map and EMOTION_MAP_PATH override the default.
+EMOTION_MAP_PATH, emotion_map = initialize_emotion_map()
 
 OLLAMA_PORT = 11434
 
@@ -93,11 +243,21 @@ def update_emotion_map(emotion, topic, keyword):
         keyword (str): The keyword to add to the emotion_map.
     """
     print("Checking if we need to update the emotion map.")
+    changed = False
     if keyword:
         if emotion in emotion_map and topic not in emotion_map[emotion]:
             emotion_map[emotion].append(topic)
             print(f"Added new topic '{topic}' to emotion '{emotion}'")
+            changed = True
     print("Updated emotion map.")
+    if changed:
+        try:
+            save_emotion_map(EMOTION_MAP_PATH, emotion_map)
+        except OSError as exc:
+            print(
+                "Error: could not save emotion map to "
+                f"{EMOTION_MAP_PATH} ({exc})."
+            )
 
 def get_emotion(topic_option):
     """Return the emotion associated with the topic option, or 'indifference' if not found."""

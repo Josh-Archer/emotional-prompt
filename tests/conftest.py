@@ -26,3 +26,11 @@ def reset_emotion_map():
     yield
     emotion_prompt.emotion_map.clear()
     emotion_prompt.emotion_map.update({k: list(v) for k, v in initial_map.items()})
+
+
+@pytest.fixture(autouse=True)
+def isolate_emotion_map_path(tmp_path):
+    """Point persistence at a throwaway file for every test."""
+    emotion_prompt = importlib.import_module("emotion-prompt")
+    emotion_prompt.EMOTION_MAP_PATH = tmp_path / "emotion_map.json"
+    yield
