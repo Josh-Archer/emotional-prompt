@@ -42,11 +42,14 @@ You can configure the Ollama model and server port via command-line arguments:
 
 ```
 usage: emotion-prompt.py [-h] [--model MODEL] [--port PORT]
+                          [--emotion-map PATH]
 
 options:
   -h, --help            show this help message and exit
   --model, -m MODEL     Ollama model to use (default: llama3.2)
   --port, -p PORT       Ollama server port (default: 11434)
+  --emotion-map PATH    JSON file for the emotion map (default:
+                        $EMOTION_MAP_PATH or ~/.emotional-prompt/emotion_map.json)
 ```
 
 #### Examples
@@ -75,6 +78,11 @@ options:
   python emotion-prompt.py --model mistral --port 11435
   # or using short flags:
   python emotion-prompt.py -m mistral -p 11435
+  ```
+
+- Choose where learned emotion topics are saved:
+  ```bash
+  python emotion-prompt.py --emotion-map ./emotion_map.json
   ```
 
 - Show help information:
