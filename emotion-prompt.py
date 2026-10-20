@@ -281,38 +281,48 @@ OLLAMA_PORT = 11434
 
 
 def topic_keyword_query_ollama(input_prompt, max_retries=3, retries=None):
-    """Query Ollama, retrying replies that do not contain two tokens."""
+    """
+    Query Ollama with a prompt.
+    """
     if retries is not None:
         max_retries = retries
+
     if max_retries is None or max_retries <= 0:
         raise ValueError("max_retries must be greater than 0")
 
     ollama_prompt = (
-        f"Respond with a single topic and the keyword from the prompt "
+        "Respond with a single topic and the keyword from the prompt "
         "that made you pick it. "
         "Be concise, do not give any extra context other than the 2 words. "
         "If you respond with more or less than that we will break. "
-        "The first word is the topic and the second is the keyword in the "
-        "prompt that made you pick it. "
-        "The keyword has to be a word that is in the prompt. "
+        "The first word is the topic and the second is the keyword in "
+        "the prompt that made you pick it. "
+        "The keyword has to be a word that is in the prompt."
         f"Here is the prompt: {input_prompt}"
     )
 
     last_result = None
-    for _ in range(max_retries):
+    for attempt in range(max_retries):
         result = query_ollama(ollama_prompt)
         if result is None:
             return None
         print(result)
         try:
             response_dict = utils.split_to_dict(result.lower())
+            response_dict["keyword"] = (
+                response_dict["keyword"]
+                if "keyword" in response_dict
+                else None
+            )
+            keyword_str = (
+                response_dict["keyword"]
+                if "keyword" in response_dict
+                else ""
+            )
+            print(f'{response_dict["topic"]}: {keyword_str}')
+            return response_dict
         except ValueError:
             last_result = result
-            continue
-        response_dict["keyword"] = response_dict.get("keyword")
-        keyword = response_dict["keyword"] or ""
-        print(f'{response_dict["topic"]}: {keyword}')
-        return response_dict
 
     attempts_word = "attempt" if max_retries == 1 else "attempts"
     error_message = (
@@ -332,11 +342,13 @@ def emotion_encoding(emotion, input_prompt):
     return query_ollama(input_prompt)
 
 
-def query_ollama(input_prompt):
-    url = f"http://127.0.0.1:{OLLAMA_PORT}/api/generate"
+def query_ollama(input_prompt, model=None, port=None):
+    target_port = port if port is not None else OLLAMA_PORT
+    target_model = model if model is not None else MODEL
+    url = f"http://127.0.0.1:{target_port}/api/generate"
 
     payload = {
-        "model": MODEL,
+        "model": target_model,
         "prompt": input_prompt,
         "stream": False
     }
@@ -350,10 +362,12 @@ def query_ollama(input_prompt):
         return result['response']
     except requests.exceptions.ConnectionError:
         print(
-            f"Error: Could not connect to Ollama on 127.0.0.1:{OLLAMA_PORT}. "
-            "Is it running?"
+            f"Error: Could not connect to Ollama on 127.0.0.1:{target_port}. "
+            f"Is it running?"
         )
-        print(f"Run 'ollama run {MODEL}' in a terminal and keep it open.")
+        print(
+            f"Run 'ollama run {target_model}' in a terminal and keep it open."
+        )
         return None
     except requests.exceptions.RequestException as exc:
         print(f"Error connecting to Ollama: {exc}")
